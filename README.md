@@ -26,6 +26,10 @@ make setup
 
 This creates a `.venv` virtual environment and installs the dependencies from `requirements.txt`.
 
+You don't need to run this manually every time: `make run`/`make dry-run` depend on it
+automatically, creating the venv if it's missing and reinstalling dependencies whenever
+`requirements.txt` changes.
+
 Then create your own `.env` file from the example:
 
 ```bash

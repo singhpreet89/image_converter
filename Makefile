@@ -1,6 +1,7 @@
 VENV := .venv
 PYTHON := $(VENV)/bin/python
 PIP := $(VENV)/bin/pip
+STAMP := $(VENV)/.installed
 
 APP_NAME := $(shell grep -m1 '^APP_NAME=' .env 2>/dev/null | cut -d '=' -f2)
 APP_NAME := $(if $(APP_NAME),$(APP_NAME),image_converter)
@@ -18,14 +19,22 @@ help:
 	@echo "  make clean-logs  Delete generated log files (keeps storage/logs/.gitignore)"
 	@echo "  make clean       Remove the virtual environment"
 
-setup:
-	python3 -m venv $(VENV)
-	$(PIP) install -q -r requirements.txt
+setup: $(STAMP)
 
-run:
+$(PYTHON):
+	@echo "Virtual environment not found - creating $(VENV)..."
+	python3 -m venv $(VENV)
+
+$(STAMP): $(PYTHON) requirements.txt
+	@echo "Installing/updating dependencies from requirements.txt..."
+	$(PIP) install -q -r requirements.txt
+	@touch $(STAMP)
+	@echo "Dependencies up to date."
+
+run: $(STAMP)
 	$(PYTHON) convert.py $(ARGS)
 
-dry-run:
+dry-run: $(STAMP)
 	$(PYTHON) convert.py --dry-run $(ARGS)
 
 logs:
