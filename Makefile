@@ -8,7 +8,7 @@ APP_NAME := $(if $(APP_NAME),$(APP_NAME),image_converter)
 LOG_FILE := storage/logs/$(APP_NAME).log
 
 .DEFAULT_GOAL := help
-.PHONY: help setup run dry-run logs clean-logs clean
+.PHONY: help setup run dry-run logs clean-logs clean-state clean
 
 help:
 	@echo "Available targets:"
@@ -17,6 +17,7 @@ help:
 	@echo "  make dry-run     Preview what would be converted without writing any files"
 	@echo "  make logs        Tail the run log ($(LOG_FILE))"
 	@echo "  make clean-logs  Delete generated log files (keeps storage/logs/.gitignore)"
+	@echo "  make clean-state Delete any leftover resume manifest from an interrupted run"
 	@echo "  make clean       Remove the virtual environment"
 
 setup: $(STAMP)
@@ -32,16 +33,19 @@ $(STAMP): $(PYTHON) requirements.txt
 	@echo "Dependencies up to date."
 
 run: $(STAMP)
-	$(PYTHON) convert.py $(ARGS)
+	$(PYTHON) index.py $(ARGS)
 
 dry-run: $(STAMP)
-	$(PYTHON) convert.py --dry-run $(ARGS)
+	$(PYTHON) index.py --dry-run $(ARGS)
 
 logs:
 	tail -f $(LOG_FILE)
 
 clean-logs:
 	find storage/logs -type f -name '*.log' -delete
+
+clean-state:
+	find storage/state -type f -name '*.sqlite3' -delete
 
 clean:
 	rm -rf $(VENV)
