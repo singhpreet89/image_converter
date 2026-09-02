@@ -1,5 +1,6 @@
 import argparse
 import os
+import signal
 import sys
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -209,6 +210,14 @@ class ConvertResult:
     dst_path: str = ""
 
 
+def _ignore_sigint() -> None:
+    """Ctrl+C at the terminal signals the whole foreground process group, workers
+    included - which kills them mid-`img.save()` and leaves truncated files behind.
+    Workers ignore it so the parent alone decides how to stop: queued jobs get
+    cancelled, and the handful already in flight finish writing cleanly."""
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+
 def _process_job(job: ConvertJob) -> ConvertResult:
     try:
         job.final_dst.parent.mkdir(parents=True, exist_ok=True)
@@ -261,6 +270,7 @@ class Converter:
 
         manifest_path = STATE_DIR / f"{args.app_name}.sqlite3"
         manifest: Optional[Manifest] = None
+        interrupted = False
 
         try:
             manifest = Manifest(manifest_path, read_only=args.dry_run)
@@ -350,25 +360,73 @@ class Converter:
             if args.parallel and len(jobs) > 1:
                 workers = min(args.workers or detect_cpu_count(), len(jobs))
                 log(f"Converting {len(jobs)} file(s) using {workers} parallel worker process(es)...")
-                with ProcessPoolExecutor(max_workers=workers) as executor:
+                # Deliberately not a `with` block: its __exit__ does shutdown(wait=True)
+                # with no cancellation, so a Ctrl+C would sit there grinding through every
+                # remaining queued file before the interrupt could surface.
+                executor = ProcessPoolExecutor(max_workers=workers, initializer=_ignore_sigint)
+                futures: list = []
+                handled: set = set()
+                try:
                     futures = [executor.submit(_process_job, job) for job in jobs]
                     for future in as_completed(futures):
+                        handled.add(future)
                         handle_result(future.result())
+                    executor.shutdown(wait=True)
+                except KeyboardInterrupt:
+                    interrupted = True
+                    dropped = sum(1 for f in futures if f.cancel())
+                    log(f"\nInterrupted - dropped {dropped} queued file(s), "
+                        f"letting in-flight conversion(s) finish...")
+                    executor.shutdown(wait=True)
+                    # Workers that finished while we were unwinding still produced real
+                    # output files; record them so the resume manifest matches the disk.
+                    for f in futures:
+                        if f not in handled and f.done() and not f.cancelled() and f.exception() is None:
+                            handle_result(f.result())
+                except BaseException:
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    raise
             else:
                 log(f"Converting {len(jobs)} file(s) sequentially...")
-                for job in jobs:
-                    handle_result(_process_job(job))
+                in_flight: Optional[ConvertJob] = None
+                try:
+                    for job in jobs:
+                        in_flight = job
+                        handle_result(_process_job(job))
+                        in_flight = None
+                except KeyboardInterrupt:
+                    interrupted = True
+                    if in_flight is not None:
+                        # Killed part-way through img.save(): drop the truncated output.
+                        in_flight.final_dst.unlink(missing_ok=True)
+                    log("\nInterrupted.")
 
             log(
-                f"\nDone. {converted}/{total} images converted ({renamed} renamed to avoid clobbering, "
-                f"{skipped} already converted/skipped), {len(failures)} failed."
+                f"\n{'Stopped' if interrupted else 'Done'}. {converted}/{total} images converted "
+                f"({renamed} renamed to avoid clobbering, {skipped} already converted/skipped), "
+                f"{len(failures)} failed."
             )
+            if interrupted:
+                log(f"Progress kept in {manifest_path} - rerun to pick up where this left off "
+                    f"(use --force or `make clean-state` to start over instead).")
             if failures:
                 log("\nFiles that could not be converted:")
                 for name, reason in failures:
                     log(f"  - {name}: {reason}")
+        except KeyboardInterrupt:
+            # Interrupted before conversion started (during the directory scan).
+            interrupted = True
+            log("\nInterrupted.")
         finally:
             if log_fh:
                 log_fh.close()
             if manifest:
-                manifest.delete_file()
+                # Only a run that finished normally has nothing left to resume. Deleting
+                # the manifest on interrupt would throw away the progress it exists to keep.
+                if interrupted:
+                    manifest.close()
+                else:
+                    manifest.delete_file()
+
+        if interrupted:
+            sys.exit(130)  # conventional exit code for SIGINT
